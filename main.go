@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 
 	"github.com/mattn/go-colorable"
 	"github.com/mattn/go-isatty"
@@ -109,34 +108,49 @@ func (a *counts) add(b counts) {
 
 // ---- counting ----
 
+// countReader counts lines, words, bytes, chars, and the longest line directly
+// from the raw byte/rune stream. Counting must not be done via bufio.Scanner:
+// it strips line terminators, so bytes/chars can only be reconstructed by adding
+// a fixed +1 per line — which miscounts a final line with no trailing newline
+// (e.g. `printf hi` -> 3 bytes instead of 2) and CRLF endings. Matching GNU wc:
+// lines is the number of '\n' bytes, bytes/chars count the actual input, and a
+// word is a maximal run of non-whitespace.
 func countReader(r io.Reader) (counts, error) {
 	var c counts
-	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-
-	for sc.Scan() {
-		line := sc.Text()
-		c.lines++
-		c.bytes += int64(len(line)) + 1 // +1 for newline
-		c.chars += int64(utf8.RuneCountInString(line)) + 1
-
-		// word count: split on Unicode whitespace
-		inWord := false
-		for _, r := range line {
-			if unicode.IsSpace(r) {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var curLine int64 // bytes on the current line, excluding the newline
+	inWord := false
+	for {
+		ru, size, err := br.ReadRune()
+		if size > 0 {
+			c.bytes += int64(size)
+			c.chars++
+			if unicode.IsSpace(ru) {
 				inWord = false
 			} else if !inWord {
 				inWord = true
 				c.words++
 			}
+			if ru == '\n' {
+				c.lines++
+				if curLine > c.maxLine {
+					c.maxLine = curLine
+				}
+				curLine = 0
+			} else {
+				curLine += int64(size)
+			}
 		}
-
-		// longest line (in bytes)
-		if int64(len(line)) > c.maxLine {
-			c.maxLine = int64(len(line))
+		if err != nil {
+			if err == io.EOF {
+				if curLine > c.maxLine {
+					c.maxLine = curLine
+				}
+				return c, nil
+			}
+			return c, err
 		}
 	}
-	return c, sc.Err()
 }
 
 // ---- formatting ----
