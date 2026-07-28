@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"io"
 	"os"
@@ -104,6 +105,42 @@ func (a *counts) add(b counts) {
 	if b.maxLine > a.maxLine {
 		a.maxLine = b.maxLine
 	}
+}
+
+// ---- ctrl-d as EOF ----
+
+// ctrlDReader wraps an interactive stdin so a Ctrl-D byte (0x04) in the
+// stream ends input, mirroring Unix terminal behavior. Windows consoles
+// have no such convention — the native "end input" key is Ctrl-Z — and
+// since this tool doesn't run the console in raw mode, a typed Ctrl-D
+// arrives as a literal 0x04 byte once Enter is pressed rather than as an
+// out-of-band signal, so it has to be detected in the byte stream here.
+// Only wired up when stdin is a terminal (see stdinReader): piped or
+// redirected input passes through unchanged, since 0x04 there is just data.
+type ctrlDReader struct {
+	r    io.Reader
+	done bool
+}
+
+func (c *ctrlDReader) Read(p []byte) (int, error) {
+	if c.done {
+		return 0, io.EOF
+	}
+	n, err := c.r.Read(p)
+	if i := bytes.IndexByte(p[:n], 0x04); i >= 0 {
+		c.done = true
+		return i, io.EOF
+	}
+	return n, err
+}
+
+// stdinReader returns os.Stdin, wrapped with Ctrl-D-as-EOF handling when
+// stdin is an interactive terminal.
+func stdinReader() io.Reader {
+	if isatty.IsTerminal(os.Stdin.Fd()) || isatty.IsCygwinTerminal(os.Stdin.Fd()) {
+		return &ctrlDReader{r: os.Stdin}
+	}
+	return os.Stdin
 }
 
 // ---- counting ----
@@ -351,7 +388,7 @@ func main() {
 
 	if len(files) == 0 {
 		// Read from stdin
-		c, err := countReader(os.Stdin)
+		c, err := countReader(stdinReader())
 		if err != nil {
 			warn("stdin: %v", err)
 			exitCode = 1
@@ -371,7 +408,7 @@ func main() {
 
 	for _, path := range files {
 		if path == "-" {
-			c, err := countReader(os.Stdin)
+			c, err := countReader(stdinReader())
 			results = append(results, result{"-", c, err})
 			total.add(c)
 			continue
